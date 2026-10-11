@@ -299,7 +299,9 @@ def publish_states(feed, results):
         prefix = config["mqtt"]["topic_prefix"]
         for region in feed.get("regions", []):
             if region["id"] in results:
-                client.publish(f"{prefix}/ocr_to_ha/{feed['id']}/{region['id']}/state", results[region["id"]]["value"], qos=1, retain=True)
+                result = results[region["id"]]
+                state = "unavailable" if result.get("error") or result.get("rejected") else result["value"]
+                client.publish(f"{prefix}/ocr_to_ha/{feed['id']}/{region['id']}/state", state, qos=1, retain=True)
         client.disconnect()
         client.loop_stop()
         states.setdefault(feed["id"], {})["mqtt_error"] = None
@@ -326,7 +328,21 @@ def ocr_region(image, region):
     raw = " ".join(result.txts or ()).strip()
     if not raw:
         raw = tesseract_fallback(crop)
-    return {"raw": raw, "value": clean_text(raw, region.get("rule")), "crop": encode_preview(crop)}
+    minimum = region.get("min_value")
+    maximum = region.get("max_value")
+    value = clean_text(raw, "numeric" if minimum is not None or maximum is not None else region.get("rule"))
+    result = {"raw": raw, "value": value, "crop": encode_preview(crop)}
+    if minimum is not None or maximum is not None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            result.update({"rejected": True, "error": f"No numeric value recognized (raw: '{raw}'); not published."})
+        else:
+            if (minimum is not None and number < minimum) or (maximum is not None and number > maximum):
+                lower = f"{minimum:g}" if minimum is not None else "no minimum"
+                upper = f"{maximum:g}" if maximum is not None else "no maximum"
+                result.update({"rejected": True, "error": f"OCR value {value} (raw: '{raw}') is outside {lower}–{upper}; not published."})
+    return result
 
 
 def tesseract_fallback(crop):
@@ -555,7 +571,18 @@ def validate_regions(regions):
         clean = {k: region.get(k) for k in ("x", "y", "width", "height", "frame_width", "frame_height")}
         if any(not isinstance(v, (int, float)) for v in clean.values()) or clean["width"] <= 0 or clean["height"] <= 0:
             raise HTTPException(422, "Regions need valid positive coordinates and dimensions")
-        out.append({**clean, "id": region.get("id") or uuid.uuid4().hex, "name": name, "unit": str(region.get("unit", ""))[:32], "rule": region.get("rule", "trim")})
+        bounds = {}
+        for key in ("min_value", "max_value"):
+            bound = region.get(key)
+            if bound in (None, ""):
+                bounds[key] = None
+            elif isinstance(bound, bool) or not isinstance(bound, (int, float)) or not math.isfinite(bound):
+                raise HTTPException(422, f"{key.replace('_', ' ').capitalize()} must be a finite number")
+            else:
+                bounds[key] = float(bound)
+        if bounds["min_value"] is not None and bounds["max_value"] is not None and bounds["min_value"] > bounds["max_value"]:
+            raise HTTPException(422, "Minimum accepted value cannot exceed maximum accepted value")
+        out.append({**clean, **bounds, "id": region.get("id") or uuid.uuid4().hex, "name": name, "unit": str(region.get("unit", ""))[:32], "rule": region.get("rule", "trim")})
     return out
 
 
