@@ -16,10 +16,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y --no-install-recommends tesseract-ocr libglib2.0-0 libgomp1 && rm -rf /var/lib/apt/lists/*
 COPY --from=ffmpeg-build /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 WORKDIR /app
-COPY requirements.txt .
+COPY ocr_to_ha/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
-COPY app.py ./
-COPY static ./static
+COPY ocr_to_ha/app.py ./
+COPY ocr_to_ha/static ./static
 RUN mkdir -p /data && chmod 700 /data
 EXPOSE 8000
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

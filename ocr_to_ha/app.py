@@ -19,8 +19,8 @@ import numpy as np
 import paho.mqtt.client as mqtt
 import pytesseract
 from rapidocr import RapidOCR
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
@@ -446,6 +446,19 @@ def feed_worker(feed_id):
 
 
 app = FastAPI(title="OCR-To-HA", version="1.0")
+
+
+@app.get("/static/app.js")
+def app_script(request: Request):
+    base_path = request.headers.get("x-ingress-path", "").rstrip("/")
+    if base_path and not re.fullmatch(r"/[A-Za-z0-9/_-]+", base_path):
+        base_path = ""
+    script = Path("static/app.js").read_text()
+    script = script.replace("api='/api'", f"api='{base_path}/api'")
+    script = script.replace('src="/api/feeds/', f'src="{base_path}/api/feeds/')
+    return Response(script, media_type="application/javascript")
+
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
@@ -462,9 +475,21 @@ def shutdown():
     stop_event.set()
 
 
+@app.middleware("http")
+async def ingress_access(request: Request, call_next):
+    if os.getenv("OCR_TO_HA_INGRESS") == "1" and (request.client is None or request.client.host != "172.30.32.2"):
+        return JSONResponse(status_code=403, content={"detail": "Requests must come through Home Assistant ingress"})
+    return await call_next(request)
+
+
 @app.get("/")
-def index():
-    return FileResponse("static/index.html")
+def index(request: Request):
+    base_path = request.headers.get("x-ingress-path", "").rstrip("/")
+    if base_path and not re.fullmatch(r"/[A-Za-z0-9/_-]+", base_path):
+        base_path = ""
+    page = Path("static/index.html").read_text()
+    page = page.replace('src="/static/', f'src="{base_path}/static/')
+    return HTMLResponse(page)
 
 
 @app.get("/api/config")

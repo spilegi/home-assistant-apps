@@ -1,0 +1,18 @@
+name: OCR-To-HA
+version: 0.1.0
+slug: ocr_to_ha
+description: Local camera OCR sensors published to Home Assistant over MQTT
+url: https://github.com/spilegi/OCR-To-HA
+startup: application
+boot: auto
+init: false
+arch:
+  - amd64
+  - aarch64
+ingress: true
+ingress_port: 8000
+panel_icon: mdi:camera
+panel_title: OCR-To-HA
+ports: {}
+options: {}
+schema: {}

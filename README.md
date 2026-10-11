@@ -2,6 +2,12 @@
 
 OCR-To-HA captures still frames from multiple RTSP cameras, reads user-selected screen regions with local RapidOCR (ONNX Runtime) and Tesseract fallback, and publishes retained sensor values and Home Assistant MQTT Discovery configuration. Frames and OCR run inside the application container; they are not sent to an external service. The web server listens on all interfaces for LAN access.
 
+## Install as a Home Assistant app
+
+In Home Assistant, open **Settings → Apps → App store → ⋮ → Repositories** and add `https://github.com/spilegi/OCR-To-HA`. Find **OCR-To-HA** in the repository, install it, and start it. Open its **Open Web UI** button to use the interface through Home Assistant ingress. The app stores its configuration and feed definitions in its persistent `/data` volume, which is included in Home Assistant backups. Add RTSP camera details and MQTT broker settings in the app UI; for the built-in Mosquitto broker, the host is commonly `core-mosquitto`.
+
+The Home Assistant app currently supports `amd64` and `aarch64` installations. The app needs outbound network access to the camera and MQTT broker. If Home Assistant cannot reach a camera on your network, check the host's routing and firewall rules. The ingress interface is protected by Home Assistant authentication; do not expose the standalone port directly to untrusted networks.
+
 ## Start with Docker Compose
 
 Install Docker Engine and the Docker Compose plugin, then from this directory run:
