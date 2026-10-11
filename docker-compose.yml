@@ -1,0 +1,14 @@
+services:
+  ocr-to-ha:
+    build: .
+    container_name: ocr-to-ha
+    restart: unless-stopped
+    ports:
+      - "${OCR_TO_HA_PORT:-8000}:8000"
+    volumes:
+      - ocr_to_ha_data:/data
+    environment:
+      - OCR_TO_HA_DATA=/data
+      - TZ=${TZ:-UTC}
+volumes:
+  ocr_to_ha_data:
