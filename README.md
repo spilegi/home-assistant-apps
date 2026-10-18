@@ -4,7 +4,7 @@ OCR-To-HA captures still frames from multiple RTSP cameras, reads user-selected 
 
 ## Install as a Home Assistant app
 
-In Home Assistant, open **Settings → Apps → App store → ⋮ → Repositories** and add `https://github.com/spilegi/OCR-To-HA`. Find **OCR-To-HA** in the repository, install it, and start it. Open its **Open Web UI** button to use the interface through Home Assistant ingress. The app stores its configuration and feed definitions in its persistent `/data` volume, which is included in Home Assistant backups. When an MQTT broker app such as the official Mosquitto app advertises its connection through Home Assistant's MQTT service, OCR-To-HA uses it automatically. Otherwise, configure the broker in the app UI.
+In Home Assistant, open **Settings → Apps → App store → ⋮ → Repositories** and add `https://github.com/spilegi/home-assistant-apps`. Find **OCR-To-HA** in the repository, install it, and start it. Open its **Open Web UI** button to use the interface through Home Assistant ingress. The app stores its configuration and feed definitions in its persistent `/data` volume, which is included in Home Assistant backups. When an MQTT broker app such as the official Mosquitto app advertises its connection through Home Assistant's MQTT service, OCR-To-HA uses it automatically. Otherwise, configure the broker in the app UI.
 
 The Home Assistant app currently supports `amd64` and `aarch64` installations. The app needs outbound network access to the camera and MQTT broker. If Home Assistant cannot reach a camera on your network, check the host's routing and firewall rules. The ingress interface is protected by Home Assistant authentication; do not expose the standalone port directly to untrusted networks.
 
