@@ -238,6 +238,115 @@ def clean_text(raw, rule):
     return value
 
 
+def normalize_expected_pattern(expected_format):
+    expected_format = str(expected_format or "").strip()
+    if not expected_format:
+        return ""
+    if re.fullmatch(r"X+(?:\.X+)?", expected_format):
+        return expected_format.replace("X", r"\d").replace(".", r"\.")
+    if len(expected_format) > 100:
+        raise ValueError("Expected pattern is too long")
+    tokens = []
+    index = 0
+    while index < len(expected_format):
+        char = expected_format[index]
+        if char == "\\":
+            if index + 1 >= len(expected_format) or expected_format[index + 1] != ".":
+                raise ValueError("Only an escaped decimal point is supported outside digit groups")
+            tokens.append(r"\.")
+            index += 2
+        elif char == ".":
+            tokens.append(r"\.")
+            index += 1
+        elif char == "[":
+            end = expected_format.find("]", index + 1)
+            if end < 0:
+                raise ValueError("Digit groups must have a closing bracket")
+            group = expected_format[index + 1:end].replace(",", "")
+            if not group or not re.fullmatch(r"[0-9-]+", group):
+                raise ValueError("Digit groups can contain digits, commas, and ranges such as [0-4]")
+            tokens.append(f"[{group}]")
+            index = end + 1
+        elif char.isdigit():
+            tokens.append(char)
+            index += 1
+        else:
+            raise ValueError("Use digits, digit groups like [0-4], and a decimal point only")
+    pattern = "".join(tokens)
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        raise ValueError("Invalid digit range in expected pattern") from exc
+    return pattern
+
+
+def matches_expected_format(value, expected_format):
+    if not expected_format:
+        return True
+    value = clean_text(value, "numeric")
+    return re.fullmatch(normalize_expected_pattern(expected_format), value) is not None
+
+
+def restore_expected_decimal(raw, expected_format):
+    pattern = normalize_expected_pattern(expected_format)
+    if pattern.count(r"\.") != 1 or not re.fullmatch(r"\s*\+?\d[\d\s.,]*\s*", raw or ""):
+        return None
+    left_pattern, right_pattern = pattern.split(r"\.")
+    digits = "".join(re.findall(r"\d", raw))
+    parts = []
+    for part in (left_pattern, right_pattern):
+        slots = []
+        index = 0
+        while index < len(part):
+            if part.startswith(r"\d", index):
+                slots.append(r"\d")
+                index += 2
+            elif part[index] == "[":
+                end = part.index("]", index)
+                slots.append(part[index:end + 1])
+                index = end + 1
+            else:
+                slots.append(part[index])
+                index += 1
+        parts.append(slots)
+    slots = parts[0] + parts[1]
+    if len(digits) != len(slots) or any(not re.fullmatch(slot, digit) for slot, digit in zip(slots, digits)):
+        return None
+    decimal_index = len(parts[0])
+    return f"{digits[:decimal_index]}.{digits[decimal_index:]}"
+
+
+def expected_character_whitelist(expected_format):
+    pattern = normalize_expected_pattern(expected_format)
+    if not pattern:
+        return "0123456789.,+-"
+    allowed = set()
+    index = 0
+    while index < len(pattern):
+        if pattern.startswith(r"\d", index):
+            allowed.update("0123456789")
+            index += 2
+        elif pattern.startswith(r"\.", index):
+            allowed.add(".")
+            index += 2
+        elif pattern[index] == "[":
+            end = pattern.index("]", index)
+            group = pattern[index + 1:end]
+            position = 0
+            while position < len(group):
+                if position + 2 < len(group) and group[position + 1] == "-":
+                    allowed.update(chr(code) for code in range(ord(group[position]), ord(group[position + 2]) + 1))
+                    position += 3
+                else:
+                    allowed.add(group[position])
+                    position += 1
+            index = end + 1
+        else:
+            allowed.add(pattern[index])
+            index += 1
+    return "".join(char for char in "0123456789." if char in allowed)
+
+
 def mqtt_client(timeout=5):
     cfg = config["mqtt"]
     if not cfg.get("host"):
@@ -319,19 +428,42 @@ def ocr_region(image, region):
     crop = image[y:y+h, x:x+w]
     if crop.size == 0:
         raise ValueError("Region lies outside the captured frame")
+    ocr_input = preprocess_crop(crop, region)
     global ocr_engine
     if ocr_engine is None:
         with ocr_engine_lock:
             if ocr_engine is None:
                 ocr_engine = RapidOCR()
-    result = ocr_engine(crop)
+    result = ocr_engine(ocr_input)
     raw = " ".join(result.txts or ()).strip()
-    if not raw:
-        raw = tesseract_fallback(crop)
+    scores = getattr(result, "scores", None)
+    scores = list(scores) if scores is not None else []
+    confidence = round(sum(float(score) for score in scores) / len(scores) * 100, 1) if scores else None
+    expected_format = region.get("expected_format", "")
+    numeric_mode = region.get("ocr_mode", "auto") == "numeric" or region.get("rule") == "numeric" or region.get("min_value") is not None or region.get("max_value") is not None or bool(expected_format)
+    if numeric_mode:
+        alternate, alternate_confidence = tesseract_fallback(crop, region, numeric=True)
+        rapid_matches = matches_expected_format(raw, expected_format)
+        alternate_matches = matches_expected_format(alternate, expected_format)
+        if alternate and ((alternate_matches and not rapid_matches) or (alternate_matches == rapid_matches and (not raw or (alternate_confidence is not None and (confidence is None or alternate_confidence > confidence))))):
+            raw, confidence = alternate, alternate_confidence
+    elif not raw:
+        raw, confidence = tesseract_fallback(crop, region)
     minimum = region.get("min_value")
     maximum = region.get("max_value")
-    value = clean_text(raw, "numeric" if minimum is not None or maximum is not None else region.get("rule"))
-    result = {"raw": raw, "value": value, "crop": encode_preview(crop)}
+    value = clean_text(raw, "numeric" if numeric_mode or minimum is not None or maximum is not None else region.get("rule"))
+    format_applied = False
+    if expected_format and not matches_expected_format(value, expected_format):
+        repaired_value = restore_expected_decimal(raw, expected_format)
+        if repaired_value is not None:
+            value = repaired_value
+            format_applied = True
+    result = {"raw": raw, "value": value, "confidence": confidence, "format_applied": format_applied, "crop": encode_preview(crop)}
+    minimum_confidence = region.get("min_confidence", 0)
+    if confidence is not None and confidence < minimum_confidence:
+        result.update({"rejected": True, "error": f"OCR confidence {confidence:g}% is below the configured {minimum_confidence:g}% minimum; not published."})
+    if expected_format and not matches_expected_format(value, expected_format):
+        result.update({"rejected": True, "error": f"OCR result does not match the expected format {expected_format} (use X for each digit); not published."})
     if minimum is not None or maximum is not None:
         try:
             number = float(value)
@@ -345,18 +477,50 @@ def ocr_region(image, region):
     return result
 
 
-def tesseract_fallback(crop):
+def preprocess_crop(crop, region):
+    scale = region.get("upscale", 3)
+    interpolation = cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA
+    resized = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=interpolation) if scale != 1 else crop.copy()
+    mode = region.get("preprocess", "enhance")
+    if mode == "original":
+        return resized
+    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+    if mode == "contrast":
+        gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+    elif mode == "sharpen":
+        gray = cv2.filter2D(gray, -1, np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]]))
+    elif mode == "threshold":
+        gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    else:
+        gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+    return gray
+
+
+def tesseract_fallback(crop, region, numeric=False):
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    gray = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+    scale = region.get("upscale", 3)
+    if scale != 1:
+        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    if region.get("preprocess") == "contrast":
+        gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+    elif region.get("preprocess") == "sharpen":
+        gray = cv2.filter2D(gray, -1, np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]]))
     thresholded = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
     candidates = []
     for source in (gray, thresholded):
         for page_mode in (6, 7):
-            result = pytesseract.image_to_data(source, config=f"--psm {page_mode}", output_type=pytesseract.Output.DICT)
+            allowed_characters = expected_character_whitelist(region.get("expected_format")) if numeric and region.get("expected_format") else "0123456789.,+-"
+            whitelist = f" -c tessedit_char_whitelist={allowed_characters}" if numeric else ""
+            result = pytesseract.image_to_data(source, config=f"--psm {page_mode}{whitelist}", output_type=pytesseract.Output.DICT)
             words = [(word.strip(), float(confidence)) for word, confidence in zip(result["text"], result["conf"]) if word.strip() and float(confidence) >= 0]
             if words:
                 candidates.append((sum(confidence for _, confidence in words) / len(words), " ".join(word for word, _ in words)))
-    return max(candidates, key=lambda candidate: candidate[0])[1] if candidates else ""
+    if not candidates:
+        return "", None
+    expected_format = region.get("expected_format", "")
+    matching = [candidate for candidate in candidates if matches_expected_format(candidate[1], expected_format)] if expected_format else []
+    confidence, text = max(matching or candidates, key=lambda candidate: candidate[0])
+    return text, round(confidence, 1)
 
 
 def feed_worker(feed_id):
@@ -568,6 +732,24 @@ def validate_regions(regions):
             raise HTTPException(422, "Region names must be 1–80 characters and cannot contain MQTT wildcards")
         if region.get("rule", "trim") not in ("trim", "numeric"):
             raise HTTPException(422, "Rule must be trim or numeric")
+        if region.get("ocr_mode", "auto") not in ("auto", "text", "numeric"):
+            raise HTTPException(422, "OCR mode must be auto, text, or numeric")
+        if region.get("preprocess", "enhance") not in ("original", "contrast", "sharpen", "threshold", "enhance"):
+            raise HTTPException(422, "Unknown OCR preprocessing mode")
+        expected_format = str(region.get("expected_format", "")).strip()
+        try:
+            normalize_expected_pattern(expected_format)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        try:
+            upscale = int(region.get("upscale", 3))
+            min_confidence = float(region.get("min_confidence", 0))
+        except (TypeError, ValueError):
+            raise HTTPException(422, "OCR scale and minimum confidence must be numbers")
+        if upscale < 1 or upscale > 5:
+            raise HTTPException(422, "OCR upscale must be between 1 and 5")
+        if not math.isfinite(min_confidence) or min_confidence < 0 or min_confidence > 100:
+            raise HTTPException(422, "Minimum OCR confidence must be between 0 and 100")
         clean = {k: region.get(k) for k in ("x", "y", "width", "height", "frame_width", "frame_height")}
         if any(not isinstance(v, (int, float)) for v in clean.values()) or clean["width"] <= 0 or clean["height"] <= 0:
             raise HTTPException(422, "Regions need valid positive coordinates and dimensions")
@@ -582,7 +764,7 @@ def validate_regions(regions):
                 bounds[key] = float(bound)
         if bounds["min_value"] is not None and bounds["max_value"] is not None and bounds["min_value"] > bounds["max_value"]:
             raise HTTPException(422, "Minimum accepted value cannot exceed maximum accepted value")
-        out.append({**clean, **bounds, "id": region.get("id") or uuid.uuid4().hex, "name": name, "unit": str(region.get("unit", ""))[:32], "rule": region.get("rule", "trim")})
+        out.append({**clean, **bounds, "id": region.get("id") or uuid.uuid4().hex, "name": name, "unit": str(region.get("unit", ""))[:32], "rule": region.get("rule", "trim"), "ocr_mode": region.get("ocr_mode", "auto"), "preprocess": region.get("preprocess", "enhance"), "upscale": upscale, "min_confidence": min_confidence, "expected_format": expected_format})
     return out
 
 
