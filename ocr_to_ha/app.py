@@ -10,6 +10,8 @@ import subprocess
 import threading
 import time
 import uuid
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
@@ -38,6 +40,8 @@ refresh_events = {}
 ocr_engine = None
 ocr_engine_lock = threading.Lock()
 stop_event = threading.Event()
+mqtt_service_lock = threading.Lock()
+mqtt_service_cache = {"checked_at": 0.0, "value": None}
 
 
 def now():
@@ -94,9 +98,53 @@ def public_feed(feed):
 
 
 def public_mqtt():
-    result = {k: v for k, v in config["mqtt"].items() if k != "password"}
-    result["password_set"] = bool(config["mqtt"].get("password"))
+    effective, source = mqtt_connection_settings()
+    result = {k: v for k, v in effective.items() if k != "password"}
+    result["password_set"] = bool(effective.get("password"))
+    result["source"] = source
     return result
+
+
+def homeassistant_mqtt_service():
+    token = os.getenv("SUPERVISOR_TOKEN")
+    if not token:
+        return None
+    current_time = time.monotonic()
+    with mqtt_service_lock:
+        if current_time - mqtt_service_cache["checked_at"] < 30:
+            value = mqtt_service_cache["value"]
+            return value.copy() if value else None
+        value = None
+        request = urllib.request.Request(
+            "http://supervisor/services/mqtt",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=2) as response:
+                service = json.load(response)
+            host = service.get("host")
+            port = int(service.get("port", 1883))
+            if host and 1 <= port <= 65535:
+                value = {
+                    "host": host,
+                    "port": port,
+                    "username": service.get("username", ""),
+                    "password": service.get("password", ""),
+                    "tls": bool(service.get("ssl", False)),
+                }
+        except (OSError, TypeError, ValueError, urllib.error.URLError, json.JSONDecodeError):
+            value = None
+        mqtt_service_cache.update({"checked_at": current_time, "value": value})
+        return value.copy() if value else None
+
+
+def mqtt_connection_settings():
+    with lock:
+        manual = dict(config["mqtt"])
+    service = homeassistant_mqtt_service()
+    if not service:
+        return manual, "manual"
+    return {**manual, **service}, "home_assistant"
 
 
 def public_status(feed_id):
@@ -348,7 +396,7 @@ def expected_character_whitelist(expected_format):
 
 
 def mqtt_client(timeout=5):
-    cfg = config["mqtt"]
+    cfg, _ = mqtt_connection_settings()
     if not cfg.get("host"):
         raise ValueError("Configure an MQTT broker first")
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="ocr-to-ha-" + uuid.uuid4().hex[:8])
@@ -681,10 +729,13 @@ def get_config():
 @app.put("/api/mqtt")
 def put_mqtt(value: MQTTInput):
     with lock:
-        saved_password = config["mqtt"].get("password", "")
+        saved_settings = dict(config["mqtt"])
         incoming = value.model_dump()
         if not incoming["password"]:
-            incoming["password"] = saved_password
+            incoming["password"] = saved_settings.get("password", "")
+        if homeassistant_mqtt_service():
+            for key in ("host", "port", "username", "password", "tls"):
+                incoming[key] = saved_settings.get(key, incoming[key])
         config["mqtt"] = incoming
         save_config()
     return public_mqtt()
