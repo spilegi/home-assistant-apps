@@ -1,5 +1,5 @@
 name: OCR-To-HA
-version: 0.1.1
+version: 0.1.2
 slug: ocr_to_ha
 description: Local camera OCR sensors published to Home Assistant over MQTT
 url: https://github.com/spilegi/OCR-To-HA
